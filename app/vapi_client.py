@@ -48,13 +48,16 @@ Greeting script: "Thank you for calling {practice}. I'm your AI receptionist. Ma
 After getting their name: "Thank you, [name]. And could you verify your date of birth for me?"
 
 How to handle common requests:
-- "I need an appointment" → use check_availability then schedule_appointment
+- "I need an appointment" → ask if new or returning patient; use check_availability then schedule_appointment; ask about insurance for new patients via collect_insurance_info
 - "I need to change my appointment" → use find_appointment then check_availability then reschedule_appointment
-- "I need to cancel" → use find_appointment then cancel_appointment
+- "I need to cancel" → use find_appointment then cancel_appointment; offer to add to waitlist if they want a sooner slot
+- "No appointments available" or "I'm flexible" → use add_to_waitlist
 - "I need a refill" → use request_prescription_refill
 - "I need to speak to a nurse" → use transfer_to_nurse
 - "I have a question for the doctor" → use take_message
-- Emergency symptoms → instruct caller to call 911 immediately"""
+- "Billing question" or "insurance question" → use billing_question
+- Emergency symptoms → instruct caller to call 911 immediately
+- Non-English speaker: respond in the patient's language throughout the call"""
 
     tool_base = f"{settings.server_base_url}/vapi/tool"
 
@@ -102,6 +105,7 @@ How to handle common requests:
                         "date": {"type": "string", "description": "Appointment date YYYY-MM-DD"},
                         "time": {"type": "string", "description": "Appointment time e.g. '10:00 AM'"},
                         "notes": {"type": "string", "description": "Any special notes or reason for visit (optional)"},
+                        "is_new_patient": {"type": "boolean", "description": "True if this is their first visit to the practice"},
                     },
                     "required": ["patient_name", "patient_dob", "patient_phone", "provider", "appointment_type", "date", "time"],
                 },
@@ -226,6 +230,89 @@ How to handle common requests:
             },
             "server": {"url": f"{tool_base}/transfer-nurse", "secret": webhook_secret},
         },
+        # ---- New patient insurance collection ----
+        {
+            "type": "function",
+            "function": {
+                "name": "collect_insurance_info",
+                "description": (
+                    "Collect and save insurance information for a patient. "
+                    "Always call this for New Patient appointments. "
+                    "Ask for primary insurance details; secondary is optional."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patient_name": {"type": "string"},
+                        "patient_dob": {"type": "string", "description": "MM/DD/YYYY"},
+                        "primary_provider": {"type": "string", "description": "Insurance company name (e.g. Blue Cross Blue Shield)"},
+                        "member_id": {"type": "string", "description": "Insurance member ID / policy number"},
+                        "group_number": {"type": "string", "description": "Group number (optional)"},
+                        "policy_holder_name": {"type": "string", "description": "Name on the policy if different from patient (optional)"},
+                        "plan_name": {"type": "string", "description": "Plan type e.g. PPO, HMO (optional)"},
+                        "secondary_provider": {"type": "string", "description": "Secondary insurance company (optional)"},
+                        "secondary_member_id": {"type": "string", "description": "Secondary member ID (optional)"},
+                    },
+                    "required": ["patient_name", "patient_dob", "primary_provider", "member_id"],
+                },
+            },
+            "server": {"url": f"{tool_base}/collect-insurance", "secret": webhook_secret},
+        },
+        # ---- Waitlist ----
+        {
+            "type": "function",
+            "function": {
+                "name": "add_to_waitlist",
+                "description": (
+                    "Add a patient to the waitlist when no suitable appointment slot is available. "
+                    "They will be notified by SMS if a matching slot opens due to a cancellation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patient_name": {"type": "string"},
+                        "patient_dob": {"type": "string", "description": "MM/DD/YYYY"},
+                        "patient_phone": {"type": "string"},
+                        "appointment_type": {"type": "string", "description": "Type of visit needed"},
+                        "preferred_provider": {"type": "string", "description": "Preferred provider, or omit for any (optional)"},
+                        "preferred_dates": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of preferred dates YYYY-MM-DD (optional — omit for any date)",
+                        },
+                        "notes": {"type": "string", "description": "Any additional notes (optional)"},
+                    },
+                    "required": ["patient_name", "patient_dob", "patient_phone", "appointment_type"],
+                },
+            },
+            "server": {"url": f"{tool_base}/waitlist", "secret": webhook_secret},
+        },
+        # ---- Billing questions ----
+        {
+            "type": "function",
+            "function": {
+                "name": "billing_question",
+                "description": (
+                    "Handle billing, copay, or insurance coverage questions. "
+                    "Use this when the patient asks about costs, bills, EOBs, or payment plans. "
+                    "This will transfer to billing staff or log a callback request."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patient_name": {"type": "string"},
+                        "patient_phone": {"type": "string"},
+                        "question": {"type": "string", "description": "The billing question or concern"},
+                        "transfer_now": {
+                            "type": "boolean",
+                            "description": "True if patient wants to speak to billing staff now",
+                        },
+                    },
+                    "required": ["patient_name", "patient_phone", "question"],
+                },
+            },
+            "server": {"url": f"{tool_base}/billing", "secret": webhook_secret},
+        },
     ]
 
     payload = {
@@ -252,7 +339,8 @@ How to handle common requests:
         "transcriber": {
             "provider": "deepgram",
             "model": "nova-2",
-            "language": "en-US",
+            # "multi" enables automatic language detection (English, Spanish, etc.)
+            "language": "multi",
         },
         "serverUrl": f"{settings.server_base_url}/vapi/webhook",
         "serverUrlSecret": webhook_secret,

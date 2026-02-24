@@ -1,160 +1,169 @@
 # Doctor's Office AI Receptionist — Vapi + Twilio + Claude
 
-An AI-powered phone receptionist for medical practices. Patients can call to schedule, reschedule, or cancel appointments, request prescription refills, leave messages for clinical staff, or be transferred to a nurse — all handled by a conversational AI powered by **Claude** via **Vapi**, with **Twilio** for telephony.
+A full-featured AI phone receptionist for medical practices. Built with **Claude** (LLM via Vapi), **Twilio** (telephony + SMS), and **FastAPI** (webhook server).
 
-> **HIPAA Notice:** This server stores call data in memory only. For production deployments, all patient data must be stored in an encrypted, access-controlled system compliant with HIPAA's Technical Safeguards (45 CFR § 164.312). Integrate with a compliant EHR (e.g. Epic, Athena Health) instead of the in-memory appointment store.
-
----
-
-## Call Flow
-
-```
-Patient calls Twilio number
-        ↓
-Vapi answers → Claude AI Receptionist
-        ↓
-  ┌─────┴──────────────────────────────────────────────┐
-  │                                                    │
-Schedule / Reschedule /         Prescription Refill /
-Cancel Appointment              Leave Message for Staff
-  │                                                    │
-  ↓                                                    ↓
-Appointment Store           Message / Refill Log
-(EHR API in production)     (Database in production)
-  │
-  └──── Transfer to Nurse / Operator
-              ↓
-       Twilio Conference Room
-              ↓
-       Human Staff Line
-              ↓ (if no answer)
-       Voicemail Recording
-```
+> **HIPAA Notice:** For production deployments, all patient data must be stored in an encrypted, access-controlled system compliant with HIPAA's Technical Safeguards (45 CFR § 164.312). Replace the in-memory stores with a compliant database and integrate with your EHR (e.g. Epic, Athena Health). Obtain Business Associate Agreements (BAAs) from Vapi, Twilio, and Anthropic before handling PHI.
 
 ---
 
 ## Features
 
-| Feature | Description |
+### Scheduling
+| Capability | Details |
 |---|---|
-| **Schedule appointments** | Checks availability, collects patient info, books & confirms |
-| **Reschedule appointments** | Looks up existing appt, finds new slot, updates booking |
-| **Cancel appointments** | Cancels by ID with reason, frees the slot |
-| **Prescription refills** | Takes refill requests; blocks controlled substances automatically |
-| **Leave a message** | Urgency-flagged messages for care team follow-up |
-| **Transfer to nurse** | Live transfer via Twilio conference for clinical questions |
-| **Voicemail fallback** | Records message if nurse/agent doesn't answer |
-| **Emergency detection** | Instructs patient to call 911 for emergency symptoms |
-| **Admin API** | View appointments, messages, refill requests; trigger outbound calls |
+| **Check availability** | Next 5 business days, all providers or filtered |
+| **Schedule appointment** | Books slot, sends SMS confirmation, fires intake form link for new patients |
+| **Reschedule** | Finds existing appt by name/DOB, moves to new slot, sends updated SMS |
+| **Cancel** | Cancels with reason, notifies patient by SMS, auto-notifies waitlisted patients |
+| **Waitlist** | Adds patient to waitlist; texts them automatically when a matching slot opens |
+
+### Clinical Support
+| Capability | Details |
+|---|---|
+| **Prescription refills** | Logs refill request; automatically blocks controlled substances |
+| **Transfer to nurse** | Live Twilio conference transfer for clinical questions |
+| **Messages for care team** | Urgency-flagged (routine / same-day / urgent) with callback ETA |
+| **Emergency detection** | Instructs patient to call 911 for emergency symptoms immediately |
+| **Post-visit follow-up** | Automated SMS 24h after appointment (via APScheduler) |
+| **Lab results notification** | Staff triggers SMS to patient when results are ready |
+
+### Billing & Admin
+| Capability | Details |
+|---|---|
+| **Billing questions** | Logs question + callback; optional live transfer to billing line |
+| **Insurance collection** | Collects primary/secondary insurance during new patient scheduling |
+| **Refill approval** | Staff approves refill via API → patient gets SMS confirmation |
+| **Insurance verification** | Staff marks insurance as verified via API |
+
+### Automation (APScheduler)
+| Job | Schedule | What it does |
+|---|---|---|
+| SMS reminders | Daily 8:00 AM | Texts patients about tomorrow's appointments |
+| Reminder calls | Daily 8:15 AM | Vapi outbound AI call for tomorrow's appointments |
+| Follow-up SMS | Daily 9:00 AM | Post-visit check-in for yesterday's visits |
+| Waitlist reset | Every 30 min | Re-opens waitlist offers that expired (2h timeout) |
+
+### Accessibility
+| Capability | Details |
+|---|---|
+| **Multi-language** | Deepgram `multi` transcription; Claude responds in patient's language |
+| **After-hours routing** | Outside business hours: transfers to on-call line or records voicemail |
+| **Voicemail fallback** | Nurse/agent no-answer → voicemail recording |
 
 ---
 
-## Prerequisites
+## Architecture
 
-- [Vapi account](https://vapi.ai) with API key
-- [Twilio account](https://twilio.com) with a phone number
-- [Anthropic API key](https://console.anthropic.com) (Claude as LLM inside Vapi)
-- Python 3.11+
-- A public HTTPS URL ([ngrok](https://ngrok.com) for development)
+```
+Patient calls Twilio number
+        ↓
+After-hours check (middleware)
+   ├─ After hours → Transfer to on-call OR voicemail
+   └─ Business hours ↓
+        ↓
+Vapi answers → Claude AI Receptionist (multilingual)
+        ↓ (tool calls)
+┌───────────────────────────────────────────────────────────┐
+│  FastAPI Webhook Server                                    │
+│                                                           │
+│  check_availability    → appointment_store                │
+│  schedule_appointment  → appointment_store + SMS confirm  │
+│  find_appointment      → appointment_store                │
+│  reschedule_appointment→ appointment_store + SMS update   │
+│  cancel_appointment    → appointment_store + SMS + waitlist│
+│  add_to_waitlist       → waitlist store                   │
+│  request_refill        → refill log + controlled filter   │
+│  collect_insurance     → insurance store                  │
+│  take_message          → messages log (urgency-flagged)   │
+│  billing_question      → messages log + optional transfer │
+│  transfer_to_nurse     → Twilio conference bridge         │
+└───────────────────────────────────────────────────────────┘
+        ↓ (APScheduler — background)
+SMS reminders, outbound reminder calls, post-visit follow-ups
+```
 
 ---
 
 ## Setup
 
 ### 1. Install dependencies
-
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 2. Configure environment
-
 ```bash
 cp .env.example .env
-# Edit .env with your credentials and practice details
+# Edit .env — fill in all credentials and practice details
 ```
 
-Key variables:
-
-| Variable | Description |
-|---|---|
-| `VAPI_API_KEY` | Vapi dashboard API key |
-| `TWILIO_ACCOUNT_SID` | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | Twilio auth token |
-| `TWILIO_PHONE_NUMBER` | Your Twilio phone number (E.164) |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
-| `SERVER_BASE_URL` | Public HTTPS URL of this server |
-| `BUSINESS_NAME` | Your practice name |
-| `BUSINESS_HOURS` | Office hours (included in AI system prompt) |
-| `OFFICE_ADDRESS` | Physical address for patients |
-| `PROVIDERS` | Comma-separated provider names |
-| `NURSE_LINE_NUMBER` | Clinical nurse triage number |
-| `HUMAN_AGENT_NUMBER` | Front desk direct line |
-| `AFTER_HOURS_NUMBER` | On-call / answering service |
-
 ### 3. Start the server
-
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-For local development, expose with ngrok:
-
+For local dev, expose with ngrok:
 ```bash
 ngrok http 8000
-# Paste the https:// URL into SERVER_BASE_URL in .env
+# Paste the https URL into SERVER_BASE_URL in .env
 ```
 
 ### 4. Create the Vapi assistant (one-time)
-
 ```bash
 python scripts/setup_assistant.py
-# Copy VAPI_ASSISTANT_ID printed to .env
+# Copy VAPI_ASSISTANT_ID to .env
 ```
 
 ### 5. Import your Twilio number into Vapi (one-time)
-
 ```bash
 python scripts/setup_phone.py
-# Copy VAPI_PHONE_NUMBER_ID printed to .env
+# Copy VAPI_PHONE_NUMBER_ID to .env
 ```
-
-**Done.** Call your Twilio number — Claude will answer as your receptionist.
 
 ---
 
 ## API Reference
 
 ### Vapi Tool Webhooks
-| Path | Tool | Description |
-|---|---|---|
-| `POST /vapi/tool/availability` | `check_availability` | Returns open appointment slots |
-| `POST /vapi/tool/schedule` | `schedule_appointment` | Books a new appointment |
-| `POST /vapi/tool/find-appointment` | `find_appointment` | Looks up patient's appointments |
-| `POST /vapi/tool/reschedule` | `reschedule_appointment` | Moves appointment to new slot |
-| `POST /vapi/tool/cancel` | `cancel_appointment` | Cancels an appointment |
-| `POST /vapi/tool/refill` | `request_prescription_refill` | Logs a refill request |
-| `POST /vapi/tool/message` | `take_message` | Records message for care team |
-| `POST /vapi/tool/transfer-nurse` | `transfer_to_nurse` | Transfers call to nurse line |
+| Path | Tool |
+|---|---|
+| `POST /vapi/tool/availability` | `check_availability` |
+| `POST /vapi/tool/schedule` | `schedule_appointment` |
+| `POST /vapi/tool/find-appointment` | `find_appointment` |
+| `POST /vapi/tool/reschedule` | `reschedule_appointment` |
+| `POST /vapi/tool/cancel` | `cancel_appointment` |
+| `POST /vapi/tool/waitlist` | `add_to_waitlist` |
+| `POST /vapi/tool/refill` | `request_prescription_refill` |
+| `POST /vapi/tool/collect-insurance` | `collect_insurance_info` |
+| `POST /vapi/tool/message` | `take_message` |
+| `POST /vapi/tool/billing` | `billing_question` |
+| `POST /vapi/tool/transfer-nurse` | `transfer_to_nurse` |
 
 ### Twilio Webhooks
 | Path | Description |
 |---|---|
-| `POST /twilio/conference` | TwiML: join conference room |
-| `POST /twilio/agent-status` | Status callback when agent leg completes |
-| `POST /twilio/unavailable` | TwiML: agent unavailable → voicemail |
-| `POST /twilio/voicemail` | Receives voicemail recording details |
+| `POST /twilio/inbound` | Entry point (after-hours middleware applied) |
+| `POST /twilio/conference` | Join conference room (TwiML) |
+| `POST /twilio/agent-status` | Agent/nurse call status callback |
+| `POST /twilio/unavailable` | No-answer fallback TwiML |
+| `POST /twilio/voicemail` | Voicemail recording receipt |
 
 ### Admin / Staff API
 | Path | Description |
 |---|---|
-| `GET /health` | Server health + today's appointment count |
-| `GET /admin/appointments?date=YYYY-MM-DD` | List appointments (filter by date/status) |
-| `GET /admin/messages` | All messages, voicemails, nurse flags |
-| `GET /admin/refills` | All pending refill requests |
-| `PATCH /admin/refills/{idx}/approve` | Approve a refill request |
-| `POST /admin/call` | Trigger outbound AI call `{"to":"+1..."}` |
-| `GET /admin/calls` | Recent call history from Vapi |
+| `GET /health` | Health + live stats |
+| `GET /admin/appointments?date=YYYY-MM-DD` | List appointments |
+| `GET /admin/messages` | Messages, voicemails, nurse flags, billing questions |
+| `GET /admin/refills` | Refill requests |
+| `PATCH /admin/refills/{idx}/approve` | Approve refill → SMS patient |
+| `GET /admin/waitlist` | Waitlist entries |
+| `DELETE /admin/waitlist/{id}` | Remove from waitlist |
+| `GET /admin/insurance` | Unverified insurance records |
+| `PATCH /admin/insurance/verify` | Mark insurance as verified |
+| `POST /admin/lab-results` | Notify patient lab results ready |
+| `POST /admin/call` | Trigger outbound AI call |
+| `GET /admin/calls` | Recent Vapi call history |
+| `GET /admin/scheduler/jobs` | Scheduled job next run times |
 
 ---
 
@@ -163,11 +172,16 @@ python scripts/setup_phone.py
 ```
 .
 ├── app/
-│   ├── main.py              # FastAPI server — all webhook & admin handlers
+│   ├── main.py              # FastAPI server — all webhooks, middleware, admin API
 │   ├── config.py            # Settings (pydantic-settings + .env)
-│   ├── vapi_client.py       # Vapi REST client + assistant definition
+│   ├── vapi_client.py       # Vapi REST client + 11-tool assistant definition
 │   ├── twilio_client.py     # Twilio conference & call management
-│   └── appointment_store.py # In-memory scheduler (replace with EHR API)
+│   ├── appointment_store.py # Scheduling (replace with EHR API in production)
+│   ├── waitlist.py          # Waitlist management
+│   ├── insurance.py         # Insurance info store
+│   ├── sms.py               # Twilio SMS helpers
+│   ├── scheduler.py         # APScheduler background jobs
+│   └── after_hours.py       # Business hours detection + routing TwiML
 ├── scripts/
 │   ├── setup_assistant.py   # One-time: create Vapi assistant
 │   └── setup_phone.py       # One-time: import Twilio number to Vapi
@@ -177,37 +191,17 @@ python scripts/setup_phone.py
 
 ---
 
-## Customization
-
-### Connect to a real EHR / scheduling system
-Replace the functions in `app/appointment_store.py` with API calls to your EHR:
-- **Athena Health** — use the AthenaNet REST API
-- **Epic** — use Epic's FHIR R4 API
-- **Jane App** — use the Jane API
-- **Google Calendar** — use the Calendar API for simple scheduling
-
-### Add providers / appointment types
-Edit `PROVIDERS` and `APPOINTMENT_TYPES` in `app/appointment_store.py`, or pull them dynamically from your EHR.
-
-### Change the AI voice
-Update the `voice` block in `app/vapi_client.py`. ElevenLabs voices: `rachel`, `adam`, `bella`, `elli`. Or switch provider to `azure`, `google`, or `deepgram`.
-
-### After-hours handling
-Add a startup check in `app/main.py` that detects after-hours calls and plays a custom message or routes to `AFTER_HOURS_NUMBER`.
-
-### Add SMS confirmations
-After booking, use the Twilio SMS API to text the patient a confirmation with their appointment details.
-
----
-
 ## Production Checklist
 
-- [ ] Replace `appointment_store.py` with calls to your EHR API
-- [ ] Store messages and refill requests in an encrypted HIPAA-compliant database
+- [ ] Replace `appointment_store.py` with your EHR API (Epic FHIR, Athena, etc.)
+- [ ] Persist `messages_log`, `refill_requests`, `waitlist`, `insurance` in an encrypted database
+- [ ] Use Redis for `_active_calls` in `twilio_client.py`
 - [ ] Add authentication to all `/admin/*` endpoints
 - [ ] Validate `x-vapi-secret` header on all `/vapi/*` webhooks
-- [ ] Use Redis for `_active_calls` state in `twilio_client.py`
-- [ ] Enable TLS and deploy behind nginx or a managed platform (Railway, Fly.io, AWS)
-- [ ] Implement SMS appointment reminders via Twilio
-- [ ] Log all call activity to a HIPAA-compliant audit trail
-- [ ] Obtain a Business Associate Agreement (BAA) from Vapi, Twilio, and Anthropic
+- [ ] Configure `INTAKE_FORM_URL` and `PATIENT_PORTAL_URL` for patient SMS links
+- [ ] Set `OFFICE_TIMEZONE`, `OFFICE_OPEN_TIME`, `OFFICE_CLOSE_TIME` for accurate after-hours routing
+- [ ] Set `AFTER_HOURS_NUMBER` for on-call routing, or leave blank for voicemail
+- [ ] Set `BILLING_LINE_NUMBER` and `NURSE_LINE_NUMBER` for live transfers
+- [ ] Obtain BAAs from Vapi, Twilio, and Anthropic
+- [ ] Deploy behind TLS (nginx, Fly.io, Railway, AWS App Runner, etc.)
+- [ ] Implement HIPAA-compliant audit logging for all PHI access
