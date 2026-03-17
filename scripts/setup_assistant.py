@@ -26,10 +26,11 @@ def main():
     print(f"Server URL: {settings.server_base_url}")
     print(f"Model: Claude (claude-opus-4-6) via Anthropic\n")
 
+    print("Registering tools in Vapi (reusing existing by name)...")
     assistant = create_assistant()
 
     assistant_id = assistant.get("id", "")
-    print("✓ Assistant created successfully!")
+    print("[OK] Assistant created successfully!")
     print(f"  Name:  {assistant.get('name')}")
     print(f"  ID:    {assistant_id}")
     print(f"\nAdd this to your .env file:")

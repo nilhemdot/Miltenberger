@@ -13,55 +13,41 @@ def _headers() -> dict:
     }
 
 
-def create_assistant(name: str | None = None) -> dict:
-    """Create the doctor's office AI receptionist assistant in Vapi."""
-    practice = settings.business_name
-    hours = settings.business_hours
-    assistant_name = name or f"{practice} Receptionist"
+def _list_tools() -> list[dict]:
+    """Fetch all existing tools from the Vapi account."""
+    with httpx.Client() as client:
+        response = client.get(f"{VAPI_BASE_URL}/tool", headers=_headers())
+        response.raise_for_status()
+        return response.json()
+
+
+def _create_tool(tool_def: dict) -> str:
+    """Create a single tool in Vapi and return its ID."""
+    with httpx.Client() as client:
+        response = client.post(
+            f"{VAPI_BASE_URL}/tool",
+            headers=_headers(),
+            json=tool_def,
+        )
+        response.raise_for_status()
+        return response.json()["id"]
+
+
+def _get_or_create_tool(tool_def: dict, existing_tools: list[dict]) -> str:
+    """Return the ID of an existing tool matching by name, or create a new one."""
+    name = tool_def["function"]["name"]
+    for tool in existing_tools:
+        if tool.get("function", {}).get("name") == name:
+            return tool["id"]
+    return _create_tool(tool_def)
+
+
+def _tool_definitions() -> list[dict]:
+    """Return all tool definitions for the doctor's office receptionist."""
     webhook_secret = settings.vapi_api_key[:16]
-
-    system_prompt = f"""You are a professional, compassionate AI receptionist for {practice}.
-
-Your responsibilities:
-- Greet patients warmly and identify who you are speaking with
-- Schedule, reschedule, or cancel appointments
-- Take messages for doctors and clinical staff
-- Accept prescription refill requests
-- Answer general questions about the practice (hours, location, providers, services)
-- Route urgent medical concerns to clinical staff or emergency services
-
-Business hours: {hours}
-Address: {settings.office_address}
-Providers: {', '.join(settings.providers.split(','))}
-
-Critical guidelines:
-1. NEVER provide medical advice, diagnoses, or treatment recommendations. Always say "Please speak with one of our clinical staff or visit our office for medical advice."
-2. If a patient describes a medical emergency (chest pain, difficulty breathing, stroke symptoms, severe bleeding, thoughts of self-harm), say: "This sounds like a medical emergency. Please call 911 immediately or go to your nearest emergency room." Then offer to note the call.
-3. Always verify patient identity (full name + date of birth) before accessing or modifying any appointment.
-4. Be empathetic — patients calling a doctor's office may be anxious or unwell.
-5. Keep responses brief and conversational — this is a phone call.
-6. Confirm all appointment details by reading them back before finalizing.
-7. If unsure, take a message and promise follow-up from clinical staff.
-
-Greeting script: "Thank you for calling {practice}. I'm your AI receptionist. May I have your name please?"
-
-After getting their name: "Thank you, [name]. And could you verify your date of birth for me?"
-
-How to handle common requests:
-- "I need an appointment" → ask if new or returning patient; use check_availability then schedule_appointment; ask about insurance for new patients via collect_insurance_info
-- "I need to change my appointment" → use find_appointment then check_availability then reschedule_appointment
-- "I need to cancel" → use find_appointment then cancel_appointment; offer to add to waitlist if they want a sooner slot
-- "No appointments available" or "I'm flexible" → use add_to_waitlist
-- "I need a refill" → use request_prescription_refill
-- "I need to speak to a nurse" → use transfer_to_nurse
-- "I have a question for the doctor" → use take_message
-- "Billing question" or "insurance question" → use billing_question
-- Emergency symptoms → instruct caller to call 911 immediately
-- Non-English speaker: respond in the patient's language throughout the call"""
-
     tool_base = f"{settings.server_base_url}/vapi/tool"
 
-    tools = [
+    return [
         {
             "type": "function",
             "function": {
@@ -230,7 +216,6 @@ How to handle common requests:
             },
             "server": {"url": f"{tool_base}/transfer-nurse", "secret": webhook_secret},
         },
-        # ---- New patient insurance collection ----
         {
             "type": "function",
             "function": {
@@ -258,7 +243,6 @@ How to handle common requests:
             },
             "server": {"url": f"{tool_base}/collect-insurance", "secret": webhook_secret},
         },
-        # ---- Waitlist ----
         {
             "type": "function",
             "function": {
@@ -287,7 +271,6 @@ How to handle common requests:
             },
             "server": {"url": f"{tool_base}/waitlist", "secret": webhook_secret},
         },
-        # ---- Billing questions ----
         {
             "type": "function",
             "function": {
@@ -315,6 +298,66 @@ How to handle common requests:
         },
     ]
 
+
+def register_tools() -> list[dict]:
+    """Register all tools in Vapi, reusing existing ones by name. Returns tool references."""
+    existing = _list_tools()
+    tool_defs = _tool_definitions()
+    return [
+        {"type": "function", "id": _get_or_create_tool(td, existing)}
+        for td in tool_defs
+    ]
+
+
+def create_assistant(name: str | None = None) -> dict:
+    """Create the doctor's office AI receptionist assistant in Vapi."""
+    practice = settings.business_name
+    hours = settings.business_hours
+    default_name = f"{practice} Receptionist"
+    assistant_name = name or (default_name[:40] if len(default_name) > 40 else default_name)
+    webhook_secret = settings.vapi_api_key[:16]
+
+    system_prompt = f"""You are a professional, compassionate AI receptionist for {practice}.
+
+Your responsibilities:
+- Greet patients warmly and identify who you are speaking with
+- Schedule, reschedule, or cancel appointments
+- Take messages for doctors and clinical staff
+- Accept prescription refill requests
+- Answer general questions about the practice (hours, location, providers, services)
+- Route urgent medical concerns to clinical staff or emergency services
+
+Business hours: {hours}
+Address: {settings.office_address}
+Providers: {', '.join(settings.providers.split(','))}
+
+Critical guidelines:
+1. NEVER provide medical advice, diagnoses, or treatment recommendations. Always say "Please speak with one of our clinical staff or visit our office for medical advice."
+2. If a patient describes a medical emergency (chest pain, difficulty breathing, stroke symptoms, severe bleeding, thoughts of self-harm), say: "This sounds like a medical emergency. Please call 911 immediately or go to your nearest emergency room." Then offer to note the call.
+3. Always verify patient identity (full name + date of birth) before accessing or modifying any appointment.
+4. Be empathetic — patients calling a doctor's office may be anxious or unwell.
+5. Keep responses brief and conversational — this is a phone call.
+6. Confirm all appointment details by reading them back before finalizing.
+7. If unsure, take a message and promise follow-up from clinical staff.
+
+Greeting script: "Thank you for calling {practice}. I'm your AI receptionist. May I have your name please?"
+
+After getting their name: "Thank you, [name]. And could you verify your date of birth for me?"
+
+How to handle common requests:
+- "I need an appointment" → ask if new or returning patient; use check_availability then schedule_appointment; ask about insurance for new patients via collect_insurance_info
+- "I need to change my appointment" → use find_appointment then check_availability then reschedule_appointment
+- "I need to cancel" → use find_appointment then cancel_appointment; offer to add to waitlist if they want a sooner slot
+- "No appointments available" or "I'm flexible" → use add_to_waitlist
+- "I need a refill" → use request_prescription_refill
+- "I need to speak to a nurse" → use transfer_to_nurse
+- "I have a question for the doctor" → use take_message
+- "Billing question" or "insurance question" → use billing_question
+- Emergency symptoms → instruct caller to call 911 immediately
+- Non-English speaker: respond in the patient's language throughout the call"""
+
+    tools = _tool_definitions()
+
     payload = {
         "name": assistant_name,
         "model": {
@@ -323,10 +366,12 @@ How to handle common requests:
             "messages": [{"role": "system", "content": system_prompt}],
             "temperature": 0.5,  # lower = more consistent for medical context
             "maxTokens": 500,
+            "tools": tools,
         },
         "voice": {
             "provider": "11labs",
-            "voiceId": "rachel",
+            "model": "eleven_v3",
+            "voiceId": "TcAStCk0faGcHdNIFX23",
             "stability": 0.6,
             "similarityBoost": 0.8,
         },
@@ -344,7 +389,6 @@ How to handle common requests:
         },
         "serverUrl": f"{settings.server_base_url}/vapi/webhook",
         "serverUrlSecret": webhook_secret,
-        "tools": tools,
     }
 
     with httpx.Client() as client:
